@@ -160,8 +160,10 @@ void process_inotify(void)
 		if (ar != old_ar && ar < NUM_REGS) {
 			publish_register(ar);
 			char regstr[16];
-			snprintf(regstr, sizeof(regstr), "%u", ar);
-			notify("Current reg", regstr);
+			snprintf(regstr, sizeof(regstr), "Reg: %u", ar);
+			char datastr[256];
+			snprintf(datastr, sizeof(datastr), "%.*s", (int)MIN(last[ar].lvl, sizeof(datastr)), last[ar].data);
+			notify(regstr, datastr);
 		} else if (ar >= NUM_REGS) {
 			ar = old_ar;
 			char regstr[16];
