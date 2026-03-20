@@ -25,14 +25,12 @@ typedef struct {
 	size_t lvl;
 } Buf;
 static Buf recv = { 0 };
-// static Buf modified = { 0 };
 #define NUM_REGS 4
 static Buf last[NUM_REGS] = { 0 };
 
 static bool ar_file_changed = true;
 static int inotify_fd = -1;
 
-// static const char *mode_suffix[NUM_MODES] = { "69", "70", "71", "72", "73", "74" };
 uint32_t ar = 0;
 
 #define UNUSED(arg) (void)(arg)
@@ -45,7 +43,6 @@ void setup_inotify(void)
 		return;
 	}
 
-	// Watch for writes and attribute changes (chmod/touch)
 	int wd = inotify_add_watch(inotify_fd, "/tmp/clipboard_reg",
 				   IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB);
 	if (wd < 0) {
@@ -77,11 +74,9 @@ void notify(const char *title, const char *body)
 {
 	pid_t pid = fork();
 	if (pid == 0) {
-		// Child
 		execlp("notify-send", "notify-send", title, body, NULL);
-		_exit(1); // If exec fails
+		_exit(1);
 	} else if (pid > 0) {
-		// Parent - don't wait, avoid zombie
 		signal(SIGCHLD, SIG_IGN);
 	}
 }
@@ -115,8 +110,6 @@ void source_send(void *data, struct zwlr_data_control_source_v1 *src,
 	UNUSED(src);
 	UNUSED(mime_type);
 
-	// if (ar_file_changed)
-	// 	get_ar();
 	if (last[ar].data && last[ar].lvl > 0) {
 		write(fd, last[ar].data, last[ar].lvl);
 	}
@@ -152,7 +145,6 @@ void publish_register(uint32_t reg)
 	zwlr_data_control_source_v1_offer(source, "TEXT");
 
 	zwlr_data_control_device_v1_set_selection(dev, source);
-	// printf("Published register %u\n", reg);
 }
 
 void process_inotify(void)
@@ -161,9 +153,7 @@ void process_inotify(void)
 	ssize_t n;
 
 	bool changed = false;
-	// Drain all pending events and set flag
 	while ((n = read(inotify_fd, buf, sizeof(buf))) > 0) {
-		// printf("inotify\n");
 		changed = true;
 	}
 	if (changed) {
@@ -171,7 +161,6 @@ void process_inotify(void)
 		uint32_t old_ar = ar;
 		get_ar();
 		if (ar != old_ar && ar < NUM_REGS) {
-			// printf("Register changed: %u -> %u\n", old_ar, ar);
 			publish_register(ar);
 		}
 	}
@@ -191,14 +180,12 @@ void sel(void *data, struct zwlr_data_control_device_v1 *dev,
 	close(p[1]);
 	wl_display_roundtrip(dpy);
 
-	// Reset recv buffer
 	recv.lvl = 0;
 	if (!buf_ensure(&recv, 4096)) {
 		close(p[0]);
 		return;
 	}
 
-	// Read all data
 	ssize_t n;
 	while ((n = read(p[0], recv.data + recv.lvl, recv.cap - recv.lvl - 1)) > 0) {
 		recv.lvl += n;
@@ -218,26 +205,13 @@ void sel(void *data, struct zwlr_data_control_device_v1 *dev,
 
 	recv.data[recv.lvl] = '\0';
 
-	// Check if unchanged (compare lengths first, then data)
 	if (recv.lvl == last[ar].lvl && last[ar].data &&
 	    memcmp(recv.data, last[ar].data, recv.lvl) == 0) {
 		zwlr_data_control_offer_v1_destroy(offer);
 		return;
 	}
 
-	// Build modified: data + suffix
-	// const char *suffix = get_suffix();
-	// size_t suffix_len = strlen(suffix);
 	size_t need = recv.lvl;
-
-	// if (!buf_ensure(&modified, need)) {
-	// 	zwlr_data_control_offer_v1_destroy(offer);
-	// 	return;
-	// }
-
-	// memcpy(modified.data, recv.data, recv.lvl);
-	// memcpy(modified.data + recv.lvl, suffix, suffix_len + 1); // includes \0
-	// modified.lvl = recv.lvl;
 
 	// Save to last
 	if (!buf_ensure(&last[ar], need)) {
@@ -336,7 +310,7 @@ int main()
 		wl_display_flush(dpy);
 
 		if (wl_display_prepare_read(dpy) < 0) {
-			continue; // Events queued, loop back to dispatch
+			continue;
 		}
 
 		if (poll(fds, 2, -1) < 0) {
@@ -354,7 +328,6 @@ int main()
 		if (fds[1].revents & POLLIN) {
 			process_inotify();
 		}
-		// get_ar();
 	}
 
 	return 0;
