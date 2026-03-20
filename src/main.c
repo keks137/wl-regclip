@@ -142,6 +142,8 @@ void publish_register(uint32_t reg)
 	zwlr_data_control_device_v1_set_selection(dev, source);
 }
 
+#define MIN(a, b) ((a) > (b) ? (b) : (a))
+
 void process_inotify(void)
 {
 	char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
@@ -163,8 +165,10 @@ void process_inotify(void)
 		} else if (ar >= NUM_REGS) {
 			ar = old_ar;
 			char regstr[16];
-			snprintf(regstr, sizeof(regstr), "%u", ar);
-			notify("Current reg", regstr);
+			snprintf(regstr, sizeof(regstr), "Reg: %u", ar);
+			char datastr[256];
+			snprintf(datastr, sizeof(datastr), "%.*s", (int)MIN(last[ar].lvl, sizeof(datastr)), last[ar].data);
+			notify(regstr, datastr);
 		}
 	}
 }
