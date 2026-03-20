@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <linux/limits.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -25,7 +26,7 @@ typedef struct {
 } Buf;
 static Buf recv = { 0 };
 // static Buf modified = { 0 };
-#define NUM_REGS 6
+#define NUM_REGS 4
 static Buf last[NUM_REGS] = { 0 };
 
 static bool ar_file_changed = true;
@@ -71,6 +72,19 @@ static bool buf_ensure(Buf *b, size_t need)
 	b->cap = new_cap;
 	return true;
 }
+
+void notify(const char *title, const char *body)
+{
+	pid_t pid = fork();
+	if (pid == 0) {
+		// Child
+		execlp("notify-send", "notify-send", title, body, NULL);
+		_exit(1); // If exec fails
+	} else if (pid > 0) {
+		// Parent - don't wait, avoid zombie
+		signal(SIGCHLD, SIG_IGN);
+	}
+}
 void get_ar()
 {
 	if (!ar_file_changed)
@@ -84,7 +98,11 @@ void get_ar()
 
 		goto cleanup;
 	}
-	assert(ar < NUM_REGS);
+	if (ar >= NUM_REGS) {
+		char regstr[16];
+		snprintf(regstr, sizeof(regstr), "%u", ar);
+		notify("Current reg", regstr);
+	}
 cleanup:
 	fclose(f);
 	ar_file_changed = false;
