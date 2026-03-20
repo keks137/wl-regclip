@@ -1,9 +1,13 @@
+#include <assert.h>
+#include <linux/limits.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <sys/inotify.h>
 #include <string.h>
+#include <sys/poll.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <wayland-client.h>
@@ -20,14 +24,35 @@ typedef struct {
 	size_t lvl;
 } Buf;
 static Buf recv = { 0 };
-static Buf modified = { 0 };
-static Buf last = { 0 };
+// static Buf modified = { 0 };
+#define NUM_REGS 6
+static Buf last[NUM_REGS] = { 0 };
 
-#define NUM_MODES 6
-static const char *mode_suffix[NUM_MODES] = { "69", "70", "71", "72", "73", "74" };
-uint32_t active_mode = 0;
+static bool ar_file_changed = true;
+static int inotify_fd = -1;
+
+// static const char *mode_suffix[NUM_MODES] = { "69", "70", "71", "72", "73", "74" };
+uint32_t ar = 0;
 
 #define UNUSED(arg) (void)(arg)
+
+void setup_inotify(void)
+{
+	inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+	if (inotify_fd < 0) {
+		perror("inotify_init1");
+		return;
+	}
+
+	// Watch for writes and attribute changes (chmod/touch)
+	int wd = inotify_add_watch(inotify_fd, "/tmp/clipboard_reg",
+				   IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB);
+	if (wd < 0) {
+		perror("inotify_add_watch");
+		close(inotify_fd);
+		inotify_fd = -1;
+	}
+}
 
 static bool buf_ensure(Buf *b, size_t need)
 {
@@ -46,6 +71,25 @@ static bool buf_ensure(Buf *b, size_t need)
 	b->cap = new_cap;
 	return true;
 }
+void get_ar()
+{
+	if (!ar_file_changed)
+		return;
+	FILE *f = fopen("/tmp/clipboard_reg", "r");
+	if (!f)
+		return;
+
+	if (fscanf(f, "%d", &ar) != 1) {
+		ar = 0;
+
+		goto cleanup;
+	}
+	assert(ar < NUM_REGS);
+cleanup:
+	fclose(f);
+	ar_file_changed = false;
+}
+
 void source_send(void *data, struct zwlr_data_control_source_v1 *src,
 		 const char *mime_type, int32_t fd)
 {
@@ -53,41 +97,12 @@ void source_send(void *data, struct zwlr_data_control_source_v1 *src,
 	UNUSED(src);
 	UNUSED(mime_type);
 
-	if (modified.data) {
-		write(fd, modified.data, modified.lvl);
+	// if (ar_file_changed)
+	// 	get_ar();
+	if (last[ar].data && last[ar].lvl > 0) {
+		write(fd, last[ar].data, last[ar].lvl);
 	}
 	close(fd);
-}
-void get_mode()
-{
-	FILE *f = fopen("/tmp/clipboard_mode", "r");
-	if (!f)
-		return;
-
-	int mode;
-	if (fscanf(f, "%d", &mode) != 1) {
-		fclose(f);
-		return;
-	}
-	fclose(f);
-}
-
-const char *get_suffix()
-{
-	FILE *f = fopen("/tmp/clipboard_mode", "r");
-	if (!f)
-		return mode_suffix[0]; // default "69"
-
-	int mode;
-	if (fscanf(f, "%d", &mode) != 1) {
-		fclose(f);
-		return mode_suffix[0];
-	}
-	fclose(f);
-
-	if (mode >= 0 && mode < NUM_MODES)
-		return mode_suffix[mode];
-	return mode_suffix[0];
 }
 void source_cancelled(void *data, struct zwlr_data_control_source_v1 *src)
 {
@@ -101,6 +116,48 @@ static const struct zwlr_data_control_source_v1_listener source_listener = {
 	.send = source_send,
 	.cancelled = source_cancelled
 };
+void publish_register(uint32_t reg)
+{
+	if (!dev || reg >= NUM_REGS)
+		return;
+
+	if (source)
+		zwlr_data_control_source_v1_destroy(source);
+
+	source = zwlr_data_control_manager_v1_create_data_source(mgr);
+	zwlr_data_control_source_v1_add_listener(source, &source_listener, NULL);
+
+	zwlr_data_control_source_v1_offer(source, "text/plain");
+	zwlr_data_control_source_v1_offer(source, "text/plain;charset=utf-8");
+	zwlr_data_control_source_v1_offer(source, "UTF8_STRING");
+	zwlr_data_control_source_v1_offer(source, "STRING");
+	zwlr_data_control_source_v1_offer(source, "TEXT");
+
+	zwlr_data_control_device_v1_set_selection(dev, source);
+	// printf("Published register %u\n", reg);
+}
+
+void process_inotify(void)
+{
+	char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
+	ssize_t n;
+
+	bool changed = false;
+	// Drain all pending events and set flag
+	while ((n = read(inotify_fd, buf, sizeof(buf))) > 0) {
+		// printf("inotify\n");
+		changed = true;
+	}
+	if (changed) {
+		ar_file_changed = true;
+		uint32_t old_ar = ar;
+		get_ar();
+		if (ar != old_ar && ar < NUM_REGS) {
+			// printf("Register changed: %u -> %u\n", old_ar, ar);
+			publish_register(ar);
+		}
+	}
+}
 void sel(void *data, struct zwlr_data_control_device_v1 *dev,
 	 struct zwlr_data_control_offer_v1 *offer)
 {
@@ -144,49 +201,36 @@ void sel(void *data, struct zwlr_data_control_device_v1 *dev,
 	recv.data[recv.lvl] = '\0';
 
 	// Check if unchanged (compare lengths first, then data)
-	if (recv.lvl == last.lvl && last.data &&
-	    memcmp(recv.data, last.data, recv.lvl) == 0) {
+	if (recv.lvl == last[ar].lvl && last[ar].data &&
+	    memcmp(recv.data, last[ar].data, recv.lvl) == 0) {
 		zwlr_data_control_offer_v1_destroy(offer);
 		return;
 	}
 
 	// Build modified: data + suffix
-	// get_mode();
-	const char *suffix = get_suffix();
-	size_t suffix_len = strlen(suffix);
-	size_t need = recv.lvl + suffix_len + 1;
+	// const char *suffix = get_suffix();
+	// size_t suffix_len = strlen(suffix);
+	size_t need = recv.lvl;
 
-	if (!buf_ensure(&modified, need)) {
-		zwlr_data_control_offer_v1_destroy(offer);
-		return;
-	}
+	// if (!buf_ensure(&modified, need)) {
+	// 	zwlr_data_control_offer_v1_destroy(offer);
+	// 	return;
+	// }
 
-	memcpy(modified.data, recv.data, recv.lvl);
-	memcpy(modified.data + recv.lvl, suffix, suffix_len + 1); // includes \0
-	modified.lvl = recv.lvl + suffix_len;
+	// memcpy(modified.data, recv.data, recv.lvl);
+	// memcpy(modified.data + recv.lvl, suffix, suffix_len + 1); // includes \0
+	// modified.lvl = recv.lvl;
 
 	// Save to last
-	if (!buf_ensure(&last, need)) {
+	if (!buf_ensure(&last[ar], need)) {
 		zwlr_data_control_offer_v1_destroy(offer);
 		return;
 	}
-	memcpy(last.data, modified.data, modified.lvl + 1);
-	last.lvl = modified.lvl;
+	memcpy(last[ar].data, recv.data, recv.lvl);
+	last[ar].data[recv.lvl] = '\0';
+	last[ar].lvl = recv.lvl;
 
-	// Set selection
-	if (source)
-		zwlr_data_control_source_v1_destroy(source);
-
-	source = zwlr_data_control_manager_v1_create_data_source(mgr);
-	zwlr_data_control_source_v1_add_listener(source, &source_listener, NULL);
-
-	zwlr_data_control_source_v1_offer(source, "text/plain");
-	zwlr_data_control_source_v1_offer(source, "text/plain;charset=utf-8");
-	zwlr_data_control_source_v1_offer(source, "UTF8_STRING");
-	zwlr_data_control_source_v1_offer(source, "STRING");
-	zwlr_data_control_source_v1_offer(source, "TEXT");
-
-	zwlr_data_control_device_v1_set_selection(dev, source);
+	publish_register(ar);
 	zwlr_data_control_offer_v1_destroy(offer);
 }
 
@@ -216,7 +260,7 @@ void setup_device()
 		return;
 	dev = zwlr_data_control_manager_v1_get_data_device(mgr, seat);
 	zwlr_data_control_device_v1_add_listener(dev, &device_listener, NULL);
-	printf("Watching clipboard...\n");
+	// printf("Watching clipboard...\n");
 }
 
 void registry_global(void *data, struct wl_registry *reg, uint32_t id,
@@ -263,9 +307,37 @@ int main()
 		fprintf(stderr, "Failed to create data device (wlr-data-control unavailable?)\n");
 		return 1;
 	}
+	setup_inotify();
 
-	while (wl_display_dispatch(dpy) >= 0)
-		;
+	struct pollfd fds[2];
+	fds[0].fd = wl_display_get_fd(dpy);
+	fds[1].fd = inotify_fd;
+	fds[0].events = fds[1].events = POLLIN;
+	while (1) {
+		wl_display_dispatch_pending(dpy);
+		wl_display_flush(dpy);
+
+		if (wl_display_prepare_read(dpy) < 0) {
+			continue; // Events queued, loop back to dispatch
+		}
+
+		if (poll(fds, 2, -1) < 0) {
+			wl_display_cancel_read(dpy);
+			perror("poll");
+			break;
+		}
+
+		if (fds[0].revents & POLLIN) {
+			wl_display_read_events(dpy);
+		} else {
+			wl_display_cancel_read(dpy);
+		}
+
+		if (fds[1].revents & POLLIN) {
+			process_inotify();
+		}
+		// get_ar();
+	}
 
 	return 0;
 }
