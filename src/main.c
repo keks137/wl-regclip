@@ -93,11 +93,6 @@ void get_ar()
 
 		goto cleanup;
 	}
-	if (ar >= NUM_REGS) {
-		char regstr[16];
-		snprintf(regstr, sizeof(regstr), "%u", ar);
-		notify("Current reg", regstr);
-	}
 cleanup:
 	fclose(f);
 	ar_file_changed = false;
@@ -162,6 +157,11 @@ void process_inotify(void)
 		get_ar();
 		if (ar != old_ar && ar < NUM_REGS) {
 			publish_register(ar);
+		} else if (ar >= NUM_REGS) {
+			ar = old_ar;
+			char regstr[16];
+			snprintf(regstr, sizeof(regstr), "%u", ar);
+			notify("Current reg", regstr);
 		}
 	}
 }
