@@ -244,7 +244,9 @@ void sel(void *data, struct zwlr_data_control_device_v1 *dev,
 	if (pipe2(p, O_CLOEXEC | O_NONBLOCK) < 0)
 		return;
 
-	zwlr_data_control_offer_v1_receive(offer, "text/plain", p[1]);
+	// zwlr_data_control_offer_v1_receive(offer, "text/plain", p[1]);
+	zwlr_data_control_offer_v1_receive(offer, "text/plain;charset=utf-8", p[1]);
+
 	wl_display_flush(dpy);
 	close(p[1]);
 
