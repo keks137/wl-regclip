@@ -1,6 +1,7 @@
-#include <assert.h>
+#define _GNU_SOURCE
 #include <errno.h>
 #include <linux/limits.h>
+#include <sys/mman.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -17,8 +18,8 @@
 #include "wlr-data-control-unstable-v1.h"
 #include "vassert.h"
 
-#undef VINFO
-#define VINFO(msg, ...) (void)0;
+// #undef VINFO
+// #define VINFO(msg, ...) (void)0;
 
 static struct wl_display *dpy;
 static struct wl_seat *seat;
@@ -30,7 +31,6 @@ typedef struct {
 	size_t cap;
 	size_t lvl;
 } Buf;
-static Buf recv = { 0 };
 #define NUM_REGS 4
 static Buf last[NUM_REGS] = { 0 };
 
@@ -132,7 +132,6 @@ void source_send(void *data, struct zwlr_data_control_source_v1 *src,
 		ssize_t n = write(fd, last[ar].data + written, last[ar].lvl - written);
 		if (n < 0) {
 			if (errno == EINTR) {
-				VINFO("hi");
 				continue;
 			}
 			break;
@@ -189,7 +188,7 @@ void process_inotify(void)
 	}
 	if (changed) {
 		ar_file_changed = true;
-		// uint32_t old_ar = ar;
+		uint32_t old_ar = ar;
 		get_ar();
 		//if (ar != old_ar && ar < NUM_REGS) {
 		if (ar < NUM_REGS) {
@@ -218,90 +217,66 @@ void process_inotify(void)
 			VASSERT(datastr_fill <= sizeof(datastr));
 			size_t last_byte = datastr_fill == sizeof(datastr) ? datastr_fill - 1 : datastr_fill;
 			datastr[last_byte] = '\0';
-			notify("Regs:", datastr);
+			char regstr[16];
+			snprintf(regstr, sizeof(regstr), "Reg: %u", old_ar);
+
+			notify(regstr, datastr);
 		}
 	}
 }
+static struct {
+	int fd; // read end of pipe
+	struct zwlr_data_control_offer_v1 *offer;
+	Buf buf;
+} pending = { -1, NULL, { 0 } };
+
 void sel(void *data, struct zwlr_data_control_device_v1 *dev,
 	 struct zwlr_data_control_offer_v1 *offer)
 {
-	VINFO("sel start");
 	UNUSED(data);
 	UNUSED(dev);
-	if (!offer) {
-		VINFO("ret");
+	if (!offer)
 		return;
-	}
-	int p[2];
-	if (pipe(p) < 0) {
-		VINFO("ret");
+	if (pending.fd >= 0)
+		return;
 
+	int p[2];
+	if (pipe2(p, O_CLOEXEC | O_NONBLOCK) < 0)
 		return;
-	}
-	// fcntl(p[0], F_SETFL, O_NONBLOCK);
 
 	zwlr_data_control_offer_v1_receive(offer, "text/plain", p[1]);
+	wl_display_flush(dpy);
 	close(p[1]);
-	wl_display_roundtrip(dpy);
 
-	// wl_display_flush(dpy);
+	pending.fd = p[0];
+	pending.offer = offer;
+	pending.buf.lvl = 0;
+	buf_ensure(&pending.buf, 4096);
+}
 
-	recv.lvl = 0;
-	if (!buf_ensure(&recv, 4096)) {
-		close(p[0]);
+void process_clipboard(void)
+{
+	if (pending.buf.lvl == 0)
+		goto cleanup;
 
-		VINFO("ret");
-		return;
-	}
+	pending.buf.data[pending.buf.lvl] = '\0';
 
-	ssize_t n;
-	while ((n = read(p[0], recv.data + recv.lvl, recv.cap - recv.lvl - 1)) > 0) {
-		recv.lvl += n;
-		if (recv.lvl >= recv.cap - 8) {
-			if (!buf_ensure(&recv, recv.cap * 2)) {
-				close(p[0]);
-				VINFO("ret");
-				return;
-			}
+	if (pending.buf.lvl != last[ar].lvl ||
+	    !last[ar].data ||
+	    memcmp(pending.buf.data, last[ar].data, pending.buf.lvl) != 0) {
+		size_t need = pending.buf.lvl + 1;
+		if (buf_ensure(&last[ar], need)) {
+			memcpy(last[ar].data, pending.buf.data, pending.buf.lvl);
+			last[ar].data[pending.buf.lvl] = '\0';
+			last[ar].lvl = pending.buf.lvl;
+			publish_register(ar);
 		}
-		if (recv.lvl >= MAX_BUF_SIZE)
-			break;
-	}
-	close(p[0]);
-
-	if (n < 0 || recv.lvl == 0) {
-		zwlr_data_control_offer_v1_destroy(offer);
-		VINFO("ret");
-		return;
 	}
 
-	recv.data[recv.lvl] = '\0';
-
-	if (recv.lvl == last[ar].lvl && last[ar].data &&
-	    // memcmp(recv.data, last[ar].data, MIN(recv.lvl, 1024)) == 0) {
-	    memcmp(recv.data, last[ar].data, recv.lvl) == 0) {
-		zwlr_data_control_offer_v1_destroy(offer);
-		VINFO("ret");
-		return;
-	}
-
-	size_t need = recv.lvl;
-
-	// Save to last
-	if (!buf_ensure(&last[ar], need)) {
-		zwlr_data_control_offer_v1_destroy(offer);
-		VINFO("ret");
-		return;
-	}
-	memcpy(last[ar].data, recv.data, recv.lvl);
-	last[ar].data[recv.lvl] = '\0';
-	last[ar].lvl = recv.lvl;
-
-	VINFO("lvl: %zu", last[ar].lvl);
-	// if (last[ar].lvl > 0)
-	publish_register(ar);
-	zwlr_data_control_offer_v1_destroy(offer);
-	VINFO("sel end");
+cleanup:
+	zwlr_data_control_offer_v1_destroy(pending.offer);
+	pending.offer = NULL;
+	pending.fd = -1;
 }
 
 void data_offer(void *data, struct zwlr_data_control_device_v1 *dev,
@@ -330,7 +305,6 @@ void setup_device()
 		return;
 	dev = zwlr_data_control_manager_v1_get_data_device(mgr, seat);
 	zwlr_data_control_device_v1_add_listener(dev, &device_listener, NULL);
-	// printf("Watching clipboard...");
 }
 
 void registry_global(void *data, struct wl_registry *reg, uint32_t id,
@@ -378,22 +352,24 @@ int main()
 	}
 	VENSURE(setup_inotify());
 
-	struct pollfd fds[2];
+	struct pollfd fds[3];
 	fds[0].fd = wl_display_get_fd(dpy);
 	fds[1].fd = inotify_fd;
 	fds[0].events = fds[1].events = POLLIN;
 	while (1) {
-		VINFO("frame");
 		wl_display_dispatch_pending(dpy);
 		wl_display_flush(dpy);
 
-		if (wl_display_prepare_read(dpy) < 0) {
-			continue;
-		}
+		fds[2].fd = pending.fd;
+		fds[2].events = POLLIN;
+		int nfds = (pending.fd >= 0) ? 3 : 2;
 
-		if (poll(fds, 2, -1) < 0) {
+		if (wl_display_prepare_read(dpy) < 0)
+			continue;
+
+		if (poll(fds, nfds, -1) < 0) {
 			wl_display_cancel_read(dpy);
-			perror("poll");
+			VERROR("poll");
 			break;
 		}
 
@@ -404,8 +380,24 @@ int main()
 		}
 
 		if (fds[1].revents & POLLIN) {
-			VINFO("inotify");
 			process_inotify();
+		}
+
+		if (pending.fd >= 0 && (fds[2].revents & (POLLIN | POLLHUP))) {
+			ssize_t n = read(pending.fd,
+					 pending.buf.data + pending.buf.lvl,
+					 pending.buf.cap - pending.buf.lvl - 1);
+
+			if (n > 0) {
+				pending.buf.lvl += n;
+				if (!buf_ensure(&pending.buf, pending.buf.cap * 2)) {
+					close(pending.fd);
+					process_clipboard();
+				}
+			} else if (n == 0 || (n < 0 && errno != EAGAIN)) {
+				close(pending.fd);
+				process_clipboard();
+			}
 		}
 	}
 }
