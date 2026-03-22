@@ -18,7 +18,7 @@
 #include "vassert.h"
 
 #undef VINFO
-#define VINFO(msg,...) (void)0;
+#define VINFO(msg, ...) (void)0;
 
 static struct wl_display *dpy;
 static struct wl_seat *seat;
@@ -43,12 +43,20 @@ uint32_t ar = 0;
 
 #define UNUSED(arg) (void)(arg)
 
-void setup_inotify(void)
+#define REGCLIP_INP_FILE "/tmp/clipboard_reg"
+bool setup_inotify(void)
 {
+	int fd = open(REGCLIP_INP_FILE, O_CREAT | O_RDONLY, 0644);
+	if (fd < 0) {
+		VERROR("Couldn't create/open " REGCLIP_INP_FILE);
+		return false;
+	}
+	close(fd);
+
 	inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (inotify_fd < 0) {
 		VERROR("inotify_init1");
-		return;
+		return false;
 	}
 
 	int wd = inotify_add_watch(inotify_fd, "/tmp/clipboard_reg",
@@ -57,7 +65,9 @@ void setup_inotify(void)
 		VERROR("inotify_add_watch");
 		close(inotify_fd);
 		inotify_fd = -1;
+		return false;
 	}
+	return true;
 }
 
 static bool buf_ensure(Buf *b, size_t need)
@@ -342,8 +352,7 @@ int main()
 	signal(SIGPIPE, SIG_IGN);
 	dpy = wl_display_connect(NULL);
 	if (!dpy) {
-		VERROR("Failed to connect to Wayland display");
-		return 1;
+		VPANIC("Failed to connect to Wayland display");
 	}
 
 	struct wl_registry *reg = wl_display_get_registry(dpy);
@@ -351,10 +360,9 @@ int main()
 	wl_display_roundtrip(dpy);
 
 	if (!dev) {
-		VERROR("Failed to create data device (wlr-data-control unavailable?)");
-		return 1;
+		VPANIC("Failed to create data device (wlr-data-control unavailable?)");
 	}
-	setup_inotify();
+	VENSURE(setup_inotify());
 
 	struct pollfd fds[2];
 	fds[0].fd = wl_display_get_fd(dpy);
@@ -386,6 +394,4 @@ int main()
 			process_inotify();
 		}
 	}
-
-	return 0;
 }
