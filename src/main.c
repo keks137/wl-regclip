@@ -12,8 +12,13 @@
 #include <sys/poll.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <wayland-client.h>
 #include "wlr-data-control-unstable-v1.h"
+#include "vassert.h"
+
+#undef VINFO
+#define VINFO(msg,...) (void)0;
 
 static struct wl_display *dpy;
 static struct wl_seat *seat;
@@ -29,6 +34,8 @@ static Buf recv = { 0 };
 #define NUM_REGS 4
 static Buf last[NUM_REGS] = { 0 };
 
+#define MAX_BUF_SIZE (1024 * 1024 * 64)
+
 static bool ar_file_changed = true;
 static int inotify_fd = -1;
 
@@ -40,14 +47,14 @@ void setup_inotify(void)
 {
 	inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
 	if (inotify_fd < 0) {
-		perror("inotify_init1");
+		VERROR("inotify_init1");
 		return;
 	}
 
 	int wd = inotify_add_watch(inotify_fd, "/tmp/clipboard_reg",
 				   IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB);
 	if (wd < 0) {
-		perror("inotify_add_watch");
+		VERROR("inotify_add_watch");
 		close(inotify_fd);
 		inotify_fd = -1;
 	}
@@ -114,8 +121,10 @@ void source_send(void *data, struct zwlr_data_control_source_v1 *src,
 	while (written < last[ar].lvl) {
 		ssize_t n = write(fd, last[ar].data + written, last[ar].lvl - written);
 		if (n < 0) {
-			if (errno == EINTR)
+			if (errno == EINTR) {
+				VINFO("hi");
 				continue;
+			}
 			break;
 		}
 		written += n;
@@ -170,7 +179,8 @@ void process_inotify(void)
 		ar_file_changed = true;
 		uint32_t old_ar = ar;
 		get_ar();
-		if (ar != old_ar && ar < NUM_REGS) {
+		//if (ar != old_ar && ar < NUM_REGS) {
+		if (ar < NUM_REGS) {
 			publish_register(ar);
 			char regstr[16];
 			snprintf(regstr, sizeof(regstr), "Reg: %u", ar);
@@ -192,21 +202,31 @@ void process_inotify(void)
 void sel(void *data, struct zwlr_data_control_device_v1 *dev,
 	 struct zwlr_data_control_offer_v1 *offer)
 {
+	VINFO("sel start");
 	UNUSED(data);
-	if (!offer)
+	if (!offer) {
+		VINFO("ret");
 		return;
-
+	}
 	int p[2];
-	if (pipe(p) < 0)
+	if (pipe(p) < 0) {
+		VINFO("ret");
+
 		return;
+	}
+	// fcntl(p[0], F_SETFL, O_NONBLOCK);
 
 	zwlr_data_control_offer_v1_receive(offer, "text/plain", p[1]);
 	close(p[1]);
 	wl_display_roundtrip(dpy);
 
+	// wl_display_flush(dpy);
+
 	recv.lvl = 0;
 	if (!buf_ensure(&recv, 4096)) {
 		close(p[0]);
+
+		VINFO("ret");
 		return;
 	}
 
@@ -216,22 +236,28 @@ void sel(void *data, struct zwlr_data_control_device_v1 *dev,
 		if (recv.lvl >= recv.cap - 8) {
 			if (!buf_ensure(&recv, recv.cap * 2)) {
 				close(p[0]);
+				VINFO("ret");
 				return;
 			}
 		}
+		if (recv.lvl >= MAX_BUF_SIZE)
+			break;
 	}
 	close(p[0]);
 
 	if (n < 0 || recv.lvl == 0) {
 		zwlr_data_control_offer_v1_destroy(offer);
+		VINFO("ret");
 		return;
 	}
 
 	recv.data[recv.lvl] = '\0';
 
 	if (recv.lvl == last[ar].lvl && last[ar].data &&
+	    // memcmp(recv.data, last[ar].data, MIN(recv.lvl, 1024)) == 0) {
 	    memcmp(recv.data, last[ar].data, recv.lvl) == 0) {
 		zwlr_data_control_offer_v1_destroy(offer);
+		VINFO("ret");
 		return;
 	}
 
@@ -240,14 +266,18 @@ void sel(void *data, struct zwlr_data_control_device_v1 *dev,
 	// Save to last
 	if (!buf_ensure(&last[ar], need)) {
 		zwlr_data_control_offer_v1_destroy(offer);
+		VINFO("ret");
 		return;
 	}
 	memcpy(last[ar].data, recv.data, recv.lvl);
 	last[ar].data[recv.lvl] = '\0';
 	last[ar].lvl = recv.lvl;
 
+	VINFO("lvl: %zu", last[ar].lvl);
+	// if (last[ar].lvl > 0)
 	publish_register(ar);
 	zwlr_data_control_offer_v1_destroy(offer);
+	VINFO("sel end");
 }
 
 void data_offer(void *data, struct zwlr_data_control_device_v1 *dev,
@@ -276,7 +306,7 @@ void setup_device()
 		return;
 	dev = zwlr_data_control_manager_v1_get_data_device(mgr, seat);
 	zwlr_data_control_device_v1_add_listener(dev, &device_listener, NULL);
-	// printf("Watching clipboard...\n");
+	// printf("Watching clipboard...");
 }
 
 void registry_global(void *data, struct wl_registry *reg, uint32_t id,
@@ -312,7 +342,7 @@ int main()
 	signal(SIGPIPE, SIG_IGN);
 	dpy = wl_display_connect(NULL);
 	if (!dpy) {
-		fprintf(stderr, "Failed to connect to Wayland display\n");
+		VERROR("Failed to connect to Wayland display");
 		return 1;
 	}
 
@@ -321,7 +351,7 @@ int main()
 	wl_display_roundtrip(dpy);
 
 	if (!dev) {
-		fprintf(stderr, "Failed to create data device (wlr-data-control unavailable?)\n");
+		VERROR("Failed to create data device (wlr-data-control unavailable?)");
 		return 1;
 	}
 	setup_inotify();
@@ -331,6 +361,7 @@ int main()
 	fds[1].fd = inotify_fd;
 	fds[0].events = fds[1].events = POLLIN;
 	while (1) {
+		VINFO("frame");
 		wl_display_dispatch_pending(dpy);
 		wl_display_flush(dpy);
 
@@ -351,6 +382,7 @@ int main()
 		}
 
 		if (fds[1].revents & POLLIN) {
+			VINFO("inotify");
 			process_inotify();
 		}
 	}
