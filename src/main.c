@@ -176,6 +176,8 @@ void publish_register(uint32_t reg)
 
 #define MIN(a, b) ((a) > (b) ? (b) : (a))
 
+#define PREVIEW_SIZE 256
+
 void process_inotify(void)
 {
 	char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
@@ -187,25 +189,36 @@ void process_inotify(void)
 	}
 	if (changed) {
 		ar_file_changed = true;
-		uint32_t old_ar = ar;
+		// uint32_t old_ar = ar;
 		get_ar();
 		//if (ar != old_ar && ar < NUM_REGS) {
 		if (ar < NUM_REGS) {
 			publish_register(ar);
 			char regstr[16];
 			snprintf(regstr, sizeof(regstr), "Reg: %u", ar);
-			char datastr[256];
+			char datastr[PREVIEW_SIZE];
 			snprintf(datastr, sizeof(datastr), "%.*s", (int)MIN(last[ar].lvl, sizeof(datastr)), last[ar].data);
 			notify(regstr, datastr);
 		} else if (ar >= NUM_REGS) {
-			ar = old_ar;
-			if (ar >= NUM_REGS)
-				ar = 0;
-			char regstr[16];
-			snprintf(regstr, sizeof(regstr), "Reg: %u", ar);
-			char datastr[256];
-			snprintf(datastr, sizeof(datastr), "%.*s", (int)MIN(last[ar].lvl, sizeof(datastr)), last[ar].data);
-			notify(regstr, datastr);
+			char datastr[PREVIEW_SIZE];
+			char regentry[PREVIEW_SIZE / NUM_REGS];
+
+			size_t datastr_fill = 0;
+			for (size_t i = 0; i < NUM_REGS; i++) {
+				regentry[0] = i + '0';
+				regentry[1] = ':';
+				size_t other_stuff = 1 + 1 + 1;
+				size_t data_part_len = MIN(last[i].lvl, sizeof(regentry) - other_stuff);
+				size_t ent_len = other_stuff + data_part_len;
+				regentry[ent_len - 1] = '\n';
+				memcpy(regentry + 2, last[i].data, data_part_len);
+				memcpy(datastr + datastr_fill, regentry, ent_len);
+				datastr_fill += ent_len;
+			}
+			VASSERT(datastr_fill <= sizeof(datastr));
+			size_t last_byte = datastr_fill == sizeof(datastr) ? datastr_fill - 1 : datastr_fill;
+			datastr[last_byte] = '\0';
+			notify("Regs:", datastr);
 		}
 	}
 }
@@ -214,6 +227,7 @@ void sel(void *data, struct zwlr_data_control_device_v1 *dev,
 {
 	VINFO("sel start");
 	UNUSED(data);
+	UNUSED(dev);
 	if (!offer) {
 		VINFO("ret");
 		return;
