@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <errno.h>
 #include <linux/limits.h>
 #include <signal.h>
 #include <stddef.h>
@@ -105,9 +106,21 @@ void source_send(void *data, struct zwlr_data_control_source_v1 *src,
 	UNUSED(src);
 	UNUSED(mime_type);
 
-	if (last[ar].data && last[ar].lvl > 0) {
-		write(fd, last[ar].data, last[ar].lvl);
+	if (!last[ar].data || last[ar].lvl == 0) {
+		goto cleanup;
 	}
+
+	size_t written = 0;
+	while (written < last[ar].lvl) {
+		ssize_t n = write(fd, last[ar].data + written, last[ar].lvl - written);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			break;
+		}
+		written += n;
+	}
+cleanup:
 	close(fd);
 }
 void source_cancelled(void *data, struct zwlr_data_control_source_v1 *src)
@@ -166,6 +179,8 @@ void process_inotify(void)
 			notify(regstr, datastr);
 		} else if (ar >= NUM_REGS) {
 			ar = old_ar;
+			if (ar >= NUM_REGS)
+				ar = 0;
 			char regstr[16];
 			snprintf(regstr, sizeof(regstr), "Reg: %u", ar);
 			char datastr[256];
@@ -294,6 +309,7 @@ static const struct wl_registry_listener registry_listener = {
 
 int main()
 {
+	signal(SIGPIPE, SIG_IGN);
 	dpy = wl_display_connect(NULL);
 	if (!dpy) {
 		fprintf(stderr, "Failed to connect to Wayland display\n");
