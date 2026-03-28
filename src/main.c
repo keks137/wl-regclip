@@ -95,7 +95,6 @@ void notify(const char *title, const char *body)
 		execlp("notify-send", "notify-send", title, body, NULL);
 		_exit(1);
 	} else if (pid > 0) {
-		signal(SIGCHLD, SIG_IGN);
 	}
 }
 void get_ar()
@@ -340,6 +339,7 @@ static const struct wl_registry_listener registry_listener = {
 int main()
 {
 	signal(SIGPIPE, SIG_IGN);
+	signal(SIGCHLD, SIG_IGN);
 	dpy = wl_display_connect(NULL);
 	if (!dpy) {
 		VPANIC("Failed to connect to Wayland display");
