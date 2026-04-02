@@ -18,6 +18,14 @@
 #include "wlr-data-control-unstable-v1.h"
 #include "vassert.h"
 
+struct pending_write {
+	int fd;
+	const char *data;
+	size_t remaining;
+	struct zwlr_data_control_source_v1 *source;
+	bool active;
+} pending_wr = { -1, NULL, 0, NULL, false };
+
 // #undef VINFO
 // #define VINFO(msg, ...) (void)0;
 
@@ -115,30 +123,59 @@ cleanup:
 	ar_file_changed = false;
 }
 
+void continue_write(void)
+{
+	if (!pending_wr.active)
+		return;
+
+	while (pending_wr.remaining > 0) {
+		ssize_t n = write(pending_wr.fd,
+				  pending_wr.data + (last[ar].lvl - pending_wr.remaining),
+				  pending_wr.remaining);
+		if (n > 0) {
+			pending_wr.remaining -= n;
+		} else if (n == 0) {
+			// Should not happen on write fd, but treat as done
+			break;
+		} else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			// Wait for main loop to call us again when fd is writable
+			return;
+		} else if (errno != EINTR) {
+			// Real error – abort
+			break;
+		}
+	}
+
+	close(pending_wr.fd);
+	pending_wr.active = false;
+	pending_wr.fd = -1;
+}
 void source_send(void *data, struct zwlr_data_control_source_v1 *src,
 		 const char *mime_type, int32_t fd)
 {
 	UNUSED(data);
-	UNUSED(src);
 	UNUSED(mime_type);
 
 	if (!last[ar].data || last[ar].lvl == 0) {
-		goto cleanup;
+		close(fd);
+		return;
 	}
 
-	size_t written = 0;
-	while (written < last[ar].lvl) {
-		ssize_t n = write(fd, last[ar].data + written, last[ar].lvl - written);
-		if (n < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			break;
-		}
-		written += n;
+	if (pending_wr.active) {
+		close(fd);
+		return;
 	}
-cleanup:
-	close(fd);
+
+	int flags = fcntl(fd, F_GETFL);
+	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+	pending_wr.fd = fd;
+	pending_wr.source = src;
+	pending_wr.data = last[ar].data;
+	pending_wr.remaining = last[ar].lvl;
+	pending_wr.active = true;
+
+	continue_write();
 }
 void source_cancelled(void *data, struct zwlr_data_control_source_v1 *src)
 {
@@ -354,17 +391,33 @@ int main()
 	}
 	VENSURE(setup_inotify());
 
-	struct pollfd fds[3];
-	fds[0].fd = wl_display_get_fd(dpy);
-	fds[1].fd = inotify_fd;
-	fds[0].events = fds[1].events = POLLIN;
+	struct pollfd fds[4]; // display, inotify, pending write, clipboard read
+	int nfds;
+
 	while (1) {
 		wl_display_dispatch_pending(dpy);
 		wl_display_flush(dpy);
 
-		fds[2].fd = pending.fd;
-		fds[2].events = POLLIN;
-		int nfds = (pending.fd >= 0) ? 3 : 2;
+		nfds = 0;
+		fds[nfds].fd = wl_display_get_fd(dpy);
+		fds[nfds].events = POLLIN;
+		nfds++;
+
+		fds[nfds].fd = inotify_fd;
+		fds[nfds].events = POLLIN;
+		nfds++;
+
+		if (pending_wr.active) {
+			fds[nfds].fd = pending_wr.fd;
+			fds[nfds].events = POLLOUT;
+			nfds++;
+		}
+
+		if (pending.fd >= 0) {
+			fds[nfds].fd = pending.fd;
+			fds[nfds].events = POLLIN;
+			nfds++;
+		}
 
 		if (wl_display_prepare_read(dpy) < 0)
 			continue;
@@ -385,11 +438,20 @@ int main()
 			process_inotify();
 		}
 
-		if (pending.fd >= 0 && (fds[2].revents & (POLLIN | POLLHUP))) {
+		int write_idx = pending_wr.active ? 2 : -1;
+		if (write_idx >= 0 && (fds[write_idx].revents & POLLOUT)) {
+			continue_write();
+		}
+		if (write_idx >= 0 && (fds[write_idx].revents & (POLLERR | POLLHUP))) {
+			close(pending_wr.fd);
+			pending_wr.active = false;
+		}
+
+		int read_idx = nfds - (pending.fd >= 0 ? 1 : 0);
+		if (pending.fd >= 0 && (fds[read_idx].revents & (POLLIN | POLLHUP))) {
 			ssize_t n = read(pending.fd,
 					 pending.buf.data + pending.buf.lvl,
 					 pending.buf.cap - pending.buf.lvl - 1);
-
 			if (n > 0) {
 				pending.buf.lvl += n;
 				if (!buf_ensure(&pending.buf, pending.buf.cap * 2)) {
