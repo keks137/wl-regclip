@@ -18,6 +18,9 @@
 #include "wlr-data-control-unstable-v1.h"
 #include "vassert.h"
 
+// #define STB_TRUETYPE_IMPLEMENTATION
+// #include "stb_truetype.h"
+
 struct pending_write {
 	int fd;
 	const char *data;
@@ -100,9 +103,11 @@ void notify(const char *title, const char *body)
 {
 	pid_t pid = fork();
 	if (pid == 0) {
-		execlp("notify-send", "notify-send", title, body, NULL);
+		execlp("notify-send", "notify-send",
+		       	"--hint" ,"int:transient:1",  title, body, NULL);
 		_exit(1);
 	} else if (pid > 0) {
+		signal(SIGCHLD, SIG_IGN);
 	}
 }
 void get_ar()
