@@ -240,6 +240,7 @@ void process_inotify(void)
 			snprintf(datastr, sizeof(datastr), "%.*s", (int)MIN(last[ar].lvl, sizeof(datastr)), last[ar].data);
 			notify(regstr, datastr);
 		} else if (ar >= NUM_REGS) {
+			ar=old_ar;
 			char datastr[PREVIEW_SIZE];
 			char regentry[PREVIEW_SIZE / NUM_REGS];
 
