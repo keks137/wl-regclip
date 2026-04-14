@@ -26,6 +26,7 @@
 
 static char regclip_dir[PATH_MAX];
 static char input_file[PATH_MAX];
+static char ar_file[PATH_MAX];
 struct pending_write {
 	int fd;
 	const char *data;
@@ -49,10 +50,11 @@ typedef struct {
 } Buf;
 #define NUM_REGS 4
 static Buf last[NUM_REGS] = { 0 };
+static char reg_names[NUM_REGS][PATH_MAX];
 
 #define MAX_BUF_SIZE (1024 * 1024 * 64)
 
-static bool ar_file_changed = true;
+static bool in_file_changed = true;
 static int inotify_fd = -1;
 
 uint32_t ar = 0;
@@ -103,6 +105,7 @@ static bool buf_ensure(Buf *b, size_t need)
 	return true;
 }
 
+#ifdef NOTIFY_SEND_HACK
 void notify(const char *title, const char *body)
 {
 	pid_t pid = fork();
@@ -114,9 +117,10 @@ void notify(const char *title, const char *body)
 		signal(SIGCHLD, SIG_IGN);
 	}
 }
+#endif // NOTIFY_SEND_HACK
 void get_ar()
 {
-	if (!ar_file_changed)
+	if (!in_file_changed)
 		return;
 	FILE *f = fopen(input_file, "r");
 	if (!f)
@@ -129,7 +133,7 @@ void get_ar()
 	}
 cleanup:
 	fclose(f);
-	ar_file_changed = false;
+	in_file_changed = false;
 }
 
 void continue_write(void)
@@ -159,6 +163,33 @@ void continue_write(void)
 	pending_wr.active = false;
 	pending_wr.fd = -1;
 }
+
+bool regfile_write(size_t idx, const void *data, size_t len)
+{
+	VASSERT(idx < NUM_REGS);
+	int fd = open(reg_names[idx], O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if (fd < 0)
+		return false;
+
+	const char *p = data;
+	size_t remaining = len;
+
+	while (remaining > 0) {
+		ssize_t n = write(fd, p, remaining);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			close(fd);
+			return -1;
+		}
+		p += n;
+		remaining -= n;
+	}
+
+	close(fd);
+	return true;
+}
+
 void source_send(void *data, struct zwlr_data_control_source_v1 *src,
 		 const char *mime_type, int32_t fd)
 {
@@ -222,6 +253,16 @@ void publish_register(uint32_t reg)
 
 #define PREVIEW_SIZE 256
 
+void write_ar_file()
+{
+	int fd = open(ar_file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if (fd < 0)
+		return;
+
+	dprintf(fd, "%d\n", ar);
+	close(fd);
+}
+
 void process_inotify(void)
 {
 	char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
@@ -232,7 +273,7 @@ void process_inotify(void)
 		changed = true;
 	}
 	if (changed) {
-		ar_file_changed = true;
+		in_file_changed = true;
 		uint32_t old_ar = ar;
 		get_ar();
 		//if (ar != old_ar && ar < NUM_REGS) {
@@ -242,8 +283,10 @@ void process_inotify(void)
 			snprintf(regstr, sizeof(regstr), "Reg: %u", ar);
 			char datastr[PREVIEW_SIZE];
 			snprintf(datastr, sizeof(datastr), "%.*s", (int)MIN(last[ar].lvl, sizeof(datastr)), last[ar].data);
+#ifdef NOTIFY_SEND_HACK
 			notify(regstr, datastr);
-		} else if (ar >= NUM_REGS) {
+#endif // NOTIFY_SEND_HACK
+		} else {
 			ar = old_ar;
 			char datastr[PREVIEW_SIZE];
 			char regentry[PREVIEW_SIZE / NUM_REGS];
@@ -266,8 +309,11 @@ void process_inotify(void)
 			char regstr[16];
 			snprintf(regstr, sizeof(regstr), "Reg: %u", old_ar);
 
+#ifdef NOTIFY_SEND_HACK
 			notify(regstr, datastr);
+#endif // NOTIFY_SEND_HACK
 		}
+		write_ar_file();
 	}
 }
 static struct {
@@ -317,6 +363,9 @@ void process_clipboard(void)
 			memcpy(last[ar].data, pending.buf.data, pending.buf.lvl);
 			last[ar].data[pending.buf.lvl] = '\0';
 			last[ar].lvl = pending.buf.lvl;
+
+			regfile_write(ar, last[ar].data, last[ar].lvl);
+
 			publish_register(ar);
 		}
 	}
@@ -394,6 +443,21 @@ bool mkdir_if_not_exists(const char *path)
 	}
 	return true;
 }
+
+void write_num_regs()
+{
+	static char num_regs_file[PATH_MAX];
+	strbcpy(num_regs_file, regclip_dir, sizeof(num_regs_file));
+
+	strbcat(num_regs_file, "nreg", sizeof(num_regs_file));
+	int fd = open(num_regs_file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if (fd < 0)
+		return;
+
+	dprintf(fd, "%d\n", NUM_REGS);
+	close(fd);
+}
+
 int main()
 {
 	char *xdg_data = getenv("XDG_RUNTIME_DIR");
@@ -407,6 +471,17 @@ int main()
 	VENSURE(mkdir_if_not_exists(regclip_dir));
 	strbcpy(input_file, regclip_dir, sizeof(input_file));
 	strbcat(input_file, "in", sizeof(input_file));
+	strbcpy(ar_file, regclip_dir, sizeof(ar_file));
+	strbcat(ar_file, "ar", sizeof(ar_file));
+	write_num_regs();
+
+	for (size_t i = 0; i < NUM_REGS; i++) {
+		char rname[8];
+		snprintf(rname, sizeof(rname), "r%zu", i);
+		strbcpy(reg_names[i], regclip_dir, sizeof(reg_names[i]));
+		strbcat(reg_names[i], rname, sizeof(reg_names[i]));
+		// VINFO("%s", reg_names[i]);
+	}
 
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGCHLD, SIG_IGN);
