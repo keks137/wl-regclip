@@ -11,16 +11,21 @@
 #include <sys/inotify.h>
 #include <string.h>
 #include <sys/poll.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <wayland-client.h>
 #include "wlr-data-control-unstable-v1.h"
 #include "vassert.h"
+#define STRB_IMPLEMENTATION
+#include "strb.h"
 
 // #define STB_TRUETYPE_IMPLEMENTATION
 // #include "stb_truetype.h"
 
+static char regclip_dir[PATH_MAX];
+static char input_file[PATH_MAX];
 struct pending_write {
 	int fd;
 	const char *data;
@@ -54,12 +59,11 @@ uint32_t ar = 0;
 
 #define UNUSED(arg) (void)(arg)
 
-#define REGCLIP_INP_FILE "/tmp/clipboard_reg"
 bool setup_inotify(void)
 {
-	int fd = open(REGCLIP_INP_FILE, O_CREAT | O_RDONLY, 0644);
+	int fd = open(input_file, O_CREAT | O_RDONLY, 0644);
 	if (fd < 0) {
-		VERROR("Couldn't create/open " REGCLIP_INP_FILE);
+		VERROR("Couldn't create/open %s", input_file);
 		return false;
 	}
 	close(fd);
@@ -70,7 +74,7 @@ bool setup_inotify(void)
 		return false;
 	}
 
-	int wd = inotify_add_watch(inotify_fd, "/tmp/clipboard_reg",
+	int wd = inotify_add_watch(inotify_fd, input_file,
 				   IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB);
 	if (wd < 0) {
 		VERROR("inotify_add_watch");
@@ -104,7 +108,7 @@ void notify(const char *title, const char *body)
 	pid_t pid = fork();
 	if (pid == 0) {
 		execlp("notify-send", "notify-send",
-		       	"--hint" ,"int:transient:1",  title, body, NULL);
+		       "--hint", "int:transient:1", title, body, NULL);
 		_exit(1);
 	} else if (pid > 0) {
 		signal(SIGCHLD, SIG_IGN);
@@ -114,7 +118,7 @@ void get_ar()
 {
 	if (!ar_file_changed)
 		return;
-	FILE *f = fopen("/tmp/clipboard_reg", "r");
+	FILE *f = fopen(input_file, "r");
 	if (!f)
 		return;
 
@@ -240,7 +244,7 @@ void process_inotify(void)
 			snprintf(datastr, sizeof(datastr), "%.*s", (int)MIN(last[ar].lvl, sizeof(datastr)), last[ar].data);
 			notify(regstr, datastr);
 		} else if (ar >= NUM_REGS) {
-			ar=old_ar;
+			ar = old_ar;
 			char datastr[PREVIEW_SIZE];
 			char regentry[PREVIEW_SIZE / NUM_REGS];
 
@@ -379,8 +383,31 @@ static const struct wl_registry_listener registry_listener = {
 	.global_remove = registry_global_remove
 };
 
+bool mkdir_if_not_exists(const char *path)
+{
+	int result = mkdir(path, 0755);
+	if (result < 0) {
+		if (errno == EEXIST) {
+			return true;
+		}
+		return false;
+	}
+	return true;
+}
 int main()
 {
+	char *xdg_data = getenv("XDG_RUNTIME_DIR");
+	if (!xdg_data) {
+		VWARN("No XDG_RUNTIME_DIR");
+		xdg_data = "/tmp/";
+	}
+	strbcpy(regclip_dir, xdg_data, sizeof(input_file));
+	strbcat(regclip_dir, "/regclip/", sizeof(input_file));
+	// VINFO("%s", regclip_dir);
+	VENSURE(mkdir_if_not_exists(regclip_dir));
+	strbcpy(input_file, regclip_dir, sizeof(input_file));
+	strbcat(input_file, "in", sizeof(input_file));
+
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGCHLD, SIG_IGN);
 	dpy = wl_display_connect(NULL);
