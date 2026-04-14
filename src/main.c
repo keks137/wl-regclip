@@ -474,13 +474,16 @@ int main()
 	strbcpy(ar_file, regclip_dir, sizeof(ar_file));
 	strbcat(ar_file, "ar", sizeof(ar_file));
 	write_num_regs();
+	write_ar_file();
 
 	for (size_t i = 0; i < NUM_REGS; i++) {
 		char rname[8];
 		snprintf(rname, sizeof(rname), "r%zu", i);
 		strbcpy(reg_names[i], regclip_dir, sizeof(reg_names[i]));
 		strbcat(reg_names[i], rname, sizeof(reg_names[i]));
-		// VINFO("%s", reg_names[i]);
+
+		int fd = open(reg_names[i], O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+		close(fd);
 	}
 
 	signal(SIGPIPE, SIG_IGN);
