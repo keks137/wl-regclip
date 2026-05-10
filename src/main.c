@@ -256,9 +256,10 @@ void publish_register(uint32_t reg)
 void write_ar_file()
 {
 	int fd = open(ar_file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-	if (fd < 0)
+	if (fd < 0) {
+		VWARN("couldn't write ar");
 		return;
-
+	}
 	dprintf(fd, "%d\n", ar);
 	close(fd);
 }
